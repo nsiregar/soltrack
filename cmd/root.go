@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 
-	"github.com/davecgh/go-spew/spew"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -30,9 +29,11 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().StringVarP(&walletAddress, "wallet", "w", "", "Solana wallet address to track (required)")
+
 	if err := rootCmd.MarkFlagRequired("wallet"); err != nil {
 		log.Fatalf("Error marking flag as required: %v", err)
 	}
+
 }
 
 func Execute() {
@@ -80,11 +81,11 @@ func runTracker() {
 			continue
 		}
 
-		processTransactions(ctx, rpcClient, resp)
+		processTransactions(ctx, rpcClient, resp, pubKey)
 	}
 }
 
-func processTransactions(ctx context.Context, rpcClient *rpc.Client, resp *ws.LogResult) {
+func processTransactions(ctx context.Context, rpcClient *rpc.Client, resp *ws.LogResult, pubKey solana.PublicKey) {
 	transaction, err := rpcClient.GetTransaction(
 		ctx,
 		resp.Value.Signature,
@@ -99,30 +100,58 @@ func processTransactions(ctx context.Context, rpcClient *rpc.Client, resp *ws.Lo
 		return
 	}
 
-	spew.Dump(tx)
+	instructions := tx.Message.Instructions
+	lastInstruction := instructions[len(instructions)-1]
+	programId, err := tx.ResolveProgramIDIndex(lastInstruction.ProgramIDIndex)
+	if err != nil {
+		log.Fatalf("error get program ids: %v", err)
+	}
 
-	// for _, instruction := range tx.Message.Instructions {
-	// 	// progKey, err := tx.ResolveProgramIDIndex(instruction.ProgramIDIndex)
-	// 	// if err != nil {
-	// 	// 	panic(err)
-	// 	// }
+	accounts, err := lastInstruction.ResolveInstructionAccounts(&tx.Message)
+	if err != nil {
+		log.Fatalf("failed resolve instruction accounts: %v", err)
+	}
 
-	// 	// accounts, err := instruction.ResolveInstructionAccounts(&tx.Message)
-	// 	// if err != nil {
-	// 	// 	panic(err)
-	// 	// }
-	// 	var transferInstruction TransferInstruction
-	// 	reader := bytes.NewReader(instruction.Data)
-	// 	err := binary.Read(reader, binary.LittleEndian, &transferInstruction.Amount)
-	// 	if err != nil {
-	// 		log.Fatalf("Failed to decode instruction data: %v", err)
-	// 	}
+	sender := accounts[0].PublicKey
+	recipient := accounts[1].PublicKey
 
-	// 	// Print the decoded data
-	// 	fmt.Printf("Transfer Amount: %d\n", transferInstruction.Amount)
-	// }
+	if programId == solana.SystemProgramID {
+		totalAmount := amountChanges(transaction.Meta.PreBalances, transaction.Meta.PostBalances)
+		fmt.Printf("%s has sent %.6f SOL to %s\n", sender, totalAmount, recipient)
+	}
+
+	if programId == solana.TokenProgramID {
+		totalAmount := splAmountChanges(transaction.Meta.PreTokenBalances, transaction.Meta.PostTokenBalances)
+		tokenName := transaction.Meta.PreTokenBalances[0].Owner
+		fmt.Printf("%s has sent %.6f %s to %s\n", sender, totalAmount, tokenName, recipient)
+	}
+
 }
 
-// type TransferInstruction struct {
-// 	Amount uint64
-// }
+func amountChanges(preBalances []uint64, postBalances []uint64) float64 {
+	var maxValue float64
+
+	maxValue = 0
+	for i := 0; i < len(preBalances); i++ {
+		result := float64(postBalances[i]) - float64(preBalances[i])
+		if result > maxValue {
+			maxValue = result
+		}
+	}
+
+	return float64(maxValue / float64(solana.LAMPORTS_PER_SOL))
+}
+
+func splAmountChanges(preBalances []rpc.TokenBalance, postBalances []rpc.TokenBalance) float64 {
+	var maxValue float64
+
+	maxValue = 0
+	for i := 0; i < len(preBalances); i++ {
+		result := float64(postBalances[i].UiTokenAmount.Decimals) - float64(preBalances[i].UiTokenAmount.Decimals)
+		if result > maxValue {
+			maxValue = result
+		}
+	}
+
+	return maxValue
+}
